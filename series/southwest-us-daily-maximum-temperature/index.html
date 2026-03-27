@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Loading chart...</title>
+    <meta
+      name="description"
+      content="Live interactive daily maximum temperature chart for the Southwest U.S. using NOAA nClimGrid-Daily data."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../../assets/styles.css" />
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
+    <script src="../../assets/chart-page.js" defer></script>
+  </head>
+  <body data-base-path="../../" data-series-slug="southwest-us-daily-maximum-temperature">
+    <main class="app-shell chart-page-shell">
+      <div class="page-nav">
+        <a class="back-link" href="../../">All live pages</a>
+        <div id="page-summary" class="page-summary">Loading series details...</div>
+      </div>
+      <section class="chart-card">
+        <div class="chart-topline">
+          <div id="eyebrow" class="eyebrow">Our Planet in Real-Time</div>
+          <div id="status-pill" class="status-pill">Loading latest NOAA data...</div>
+        </div>
+        <div id="chart" class="chart" aria-label="Daily maximum temperature chart"></div>
+      </section>
+    </main>
+  </body>
+</html>

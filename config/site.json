@@ -1,0 +1,34 @@
+{
+  "site": {
+    "title": "Our Planet in Real-Time",
+    "tagline": "A growing collection of live pages built for fast climate communication.",
+    "description": "Each page is a focused interactive graphic with its own data pipeline, while the repository stays organized around a shared catalog, shared assets, and named datasets."
+  },
+  "series": [
+    {
+      "slug": "southwest-us-daily-maximum-temperature",
+      "kind": "seasonal-temperature-chart",
+      "title": "Daily Maximum Temperature",
+      "subtitle": "Southwest U.S.",
+      "summary": "Historical daily maximum temperature with a 1991-2020 climatology average and the current year updated automatically from NOAA.",
+      "status": "Live now",
+      "pagePath": "series/southwest-us-daily-maximum-temperature/",
+      "dataPath": "data/series/southwest-us-daily-maximum-temperature.json",
+      "imageExportName": "southwest-us-daily-maximum-temperature",
+      "source": {
+        "type": "nclimgrid-region-tmax",
+        "provider": "NOAA nClimGrid-Daily area averages",
+        "baseUrl": "https://www.ncei.noaa.gov/pub/data/daily-grids/v1-0-0/averages",
+        "regionId": "107",
+        "regionName": "Southwest U.S. (NOAA NCEI Region)",
+        "variable": "TMAX",
+        "units": "degC",
+        "startYear": 1951,
+        "referencePeriod": [
+          1991,
+          2020
+        ]
+      }
+    }
+  ]
+}
