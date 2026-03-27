@@ -1,8 +1,8 @@
 {
   "site": {
     "title": "Our Planet in Real-Time",
-    "tagline": "A growing collection of live pages built for fast climate communication.",
-    "description": "Each page is a focused interactive graphic with its own data pipeline, while the repository stays organized around a shared catalog, shared assets, and named datasets."
+    "tagline": "Stories about our planet, told with real-time data.",
+    "description": "Our Planet in Real-Time brings together live graphics that reveal patterns, changes, and extremes as they unfold."
   },
   "series": [
     {
