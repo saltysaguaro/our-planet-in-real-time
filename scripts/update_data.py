@@ -7,10 +7,11 @@ import csv
 import json
 import math
 import sys
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
@@ -19,6 +20,9 @@ from urllib.request import Request, urlopen
 
 ANCHOR_YEAR = 2000
 MAX_WORKERS = 16
+FETCH_RETRIES = 3
+BASE_RETRY_DELAY_SECONDS = 1.5
+RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config" / "site.json"
 
@@ -29,6 +33,10 @@ class MonthlySeries:
   month: int
   status: str
   values: list[float | None]
+
+
+class NoDataLoadedError(RuntimeError):
+  """Raised when NOAA returns no usable month data for a series."""
 
 
 def build_anchor_calendar() -> list[str]:
@@ -45,10 +53,32 @@ CALENDAR_INDEX = {
 }
 
 
+def utc_now() -> datetime:
+  return datetime.now(timezone.utc)
+
+
 def fetch_url(url: str) -> str:
   request = Request(url, headers={"User-Agent": "heat-watch-updater/1.0"})
-  with urlopen(request, timeout=60) as response:
-    return response.read().decode("utf-8")
+  last_error: HTTPError | URLError | None = None
+
+  for attempt in range(FETCH_RETRIES):
+    try:
+      with urlopen(request, timeout=60) as response:
+        return response.read().decode("utf-8")
+    except HTTPError as error:
+      if error.code not in RETRYABLE_HTTP_STATUS_CODES:
+        raise
+      last_error = error
+    except URLError as error:
+      last_error = error
+
+    if attempt < FETCH_RETRIES - 1:
+      time.sleep(BASE_RETRY_DELAY_SECONDS * (2**attempt))
+
+  if last_error is not None:
+    raise last_error
+
+  raise RuntimeError(f"Failed to fetch NOAA URL: {url}")
 
 
 def load_catalog() -> dict[str, Any]:
@@ -95,8 +125,8 @@ def iter_available_months(
   start_year: int,
   end_year: int,
 ) -> Iterable[MonthlySeries]:
-  current_year = datetime.utcnow().year
-  current_month = datetime.utcnow().month
+  current_year = utc_now().year
+  current_month = utc_now().month
   month_requests: list[tuple[int, int]] = []
 
   for year in range(start_year, end_year + 1):
@@ -133,7 +163,7 @@ def build_nclimgrid_region_payload(series: dict[str, Any]) -> dict[str, Any]:
   variable = source["variable"]
   start_year = int(source["startYear"])
   reference_start, reference_end = source["referencePeriod"]
-  current_year = datetime.utcnow().year
+  current_year = utc_now().year
   series_by_year: dict[int, list[float | None]] = {
     current_year: [None] * len(CALENDAR),
   }
@@ -174,7 +204,7 @@ def build_nclimgrid_region_payload(series: dict[str, Any]) -> dict[str, Any]:
         current_year_latest_value = value
 
   if latest_date is None or latest_value is None:
-    raise RuntimeError("No NOAA data could be loaded.")
+    raise NoDataLoadedError("No NOAA data could be loaded.")
 
   sorted_years = sorted(series_by_year)
   current_year_values = series_by_year[current_year]
@@ -213,7 +243,7 @@ def build_nclimgrid_region_payload(series: dict[str, Any]) -> dict[str, Any]:
       "latestDataValue": round(latest_value, 2),
       "currentYearLatestDataDate": current_year_latest_date.isoformat() if current_year_latest_date else None,
       "currentYearLatestDataValue": round(current_year_latest_value, 2) if current_year_latest_value is not None else None,
-      "generatedAt": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+      "generatedAt": utc_now().replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     },
     "calendar": CALENDAR,
     "historical": historical,
@@ -244,7 +274,26 @@ def main() -> int:
   for series in catalog["series"]:
     output_path = ROOT / series["dataPath"]
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = build_payload(series)
+    try:
+      payload = build_payload(series)
+    except NoDataLoadedError:
+      if not output_path.exists():
+        raise
+      try:
+        existing_payload = json.loads(output_path.read_text(encoding="utf-8"))
+      except json.JSONDecodeError as error:
+        raise RuntimeError(
+          f"No NOAA data loaded for {series['slug']} and the existing dataset is invalid.",
+        ) from error
+
+      latest_data_date = existing_payload.get("metadata", {}).get("latestDataDate", "unknown")
+      print(
+        f"No NOAA data loaded for {series['slug']}; keeping existing dataset at {output_path} "
+        f"(latestDataDate={latest_data_date}).",
+        file=sys.stderr,
+      )
+      continue
+
     output_path.write_text(
       json.dumps(payload, separators=(",", ":"), ensure_ascii=True),
       encoding="utf-8",
