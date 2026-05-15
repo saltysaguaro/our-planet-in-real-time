@@ -11,10 +11,11 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
@@ -23,6 +24,8 @@ MAX_WORKERS = 16
 FETCH_RETRIES = 3
 BASE_RETRY_DELAY_SECONDS = 1.5
 RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
+OPEN_METEO_END_DATE_BACKOFF_DAYS = 14
+OPEN_METEO_WINDOW_DAYS = 365
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config" / "site.json"
 
@@ -257,7 +260,190 @@ def build_nclimgrid_region_payload(series: dict[str, Any]) -> dict[str, Any]:
   }
 
 
+def round_optional(value: Any, digits: int = 1) -> float | None:
+  if value is None:
+    return None
+
+  number = float(value)
+  if math.isnan(number):
+    return None
+
+  return round(number, digits)
+
+
+def fetch_open_meteo_location(
+  source: dict[str, Any],
+  location: dict[str, Any],
+  start_date: date,
+  end_date: date,
+) -> dict[str, Any]:
+  params = {
+    "latitude": location["latitude"],
+    "longitude": location["longitude"],
+    "start_date": start_date.isoformat(),
+    "end_date": end_date.isoformat(),
+    "daily": ",".join(source["dailyVariables"]),
+    "timezone": location.get("timezone", "auto"),
+    "temperature_unit": source.get("temperatureUnit", "celsius"),
+    "precipitation_unit": source.get("precipitationUnit", "mm"),
+  }
+  url = f"{source['baseUrl']}?{urlencode(params)}"
+  return json.loads(fetch_url(url))
+
+
+def extract_open_meteo_location_values(
+  location: dict[str, Any],
+  response: dict[str, Any],
+) -> tuple[list[str], dict[str, Any]]:
+  daily = response.get("daily") or {}
+  dates = daily.get("time") or []
+
+  def daily_values(variable: str, digits: int = 1) -> list[float | None]:
+    raw_values = daily.get(variable) or []
+    return [
+      round_optional(raw_values[index], digits) if index < len(raw_values) else None
+      for index in range(len(dates))
+    ]
+
+  return dates, {
+    "id": location["id"],
+    "name": location["name"],
+    "latitude": location["latitude"],
+    "longitude": location["longitude"],
+    "timezone": location.get("timezone", response.get("timezone")),
+    "grid": {
+      "latitude": round_optional(response.get("latitude"), 4),
+      "longitude": round_optional(response.get("longitude"), 4),
+      "elevationMeters": round_optional(response.get("elevation"), 1),
+    },
+    "values": {
+      "temperatureMaxC": daily_values("temperature_2m_max"),
+      "temperatureMinC": daily_values("temperature_2m_min"),
+      "relativeHumidityMeanPct": daily_values("relative_humidity_2m_mean"),
+      "precipitationSumMm": daily_values("precipitation_sum", 2),
+    },
+  }
+
+
+def trim_open_meteo_locations(
+  dates: list[str],
+  locations: list[dict[str, Any]],
+) -> tuple[list[str], list[dict[str, Any]]]:
+  last_valid_indices: list[int] = []
+
+  for location in locations:
+    values = location["values"]
+    last_valid_index = -1
+
+    for index in range(len(dates) - 1, -1, -1):
+      if any(values[key][index] is not None for key in values):
+        last_valid_index = index
+        break
+
+    if last_valid_index == -1:
+      raise NoDataLoadedError(f"No Open-Meteo data loaded for {location['name']}.")
+
+    last_valid_indices.append(last_valid_index)
+
+  final_index = min(last_valid_indices)
+  trimmed_dates = dates[: final_index + 1]
+  trimmed_locations: list[dict[str, Any]] = []
+
+  for location in locations:
+    trimmed_location = {
+      **location,
+      "values": {
+        key: values[: final_index + 1]
+        for key, values in location["values"].items()
+      },
+    }
+    trimmed_locations.append(trimmed_location)
+
+  return trimmed_dates, trimmed_locations
+
+
+def build_open_meteo_weather_story_payload(series: dict[str, Any]) -> dict[str, Any]:
+  source = series["source"]
+  requested_end_date = utc_now().date() - timedelta(days=1)
+  requested_start_date = requested_end_date - timedelta(days=OPEN_METEO_WINDOW_DAYS - 1)
+  locations_config = source.get("locations") or []
+
+  if not locations_config:
+    raise ValueError(f"No locations configured for {series['slug']}.")
+
+  last_error: HTTPError | None = None
+
+  for day_offset in range(OPEN_METEO_END_DATE_BACKOFF_DAYS + 1):
+    end_date = requested_end_date - timedelta(days=day_offset)
+    start_date = end_date - timedelta(days=OPEN_METEO_WINDOW_DAYS - 1)
+
+    try:
+      aligned_dates: list[str] | None = None
+      locations: list[dict[str, Any]] = []
+
+      for location in locations_config:
+        response = fetch_open_meteo_location(source, location, start_date, end_date)
+        dates, location_values = extract_open_meteo_location_values(location, response)
+
+        if aligned_dates is None:
+          aligned_dates = dates
+        elif dates != aligned_dates:
+          raise RuntimeError(f"Open-Meteo returned misaligned dates for {location['name']}.")
+
+        locations.append(location_values)
+
+      if not aligned_dates:
+        raise NoDataLoadedError("No Open-Meteo dates loaded.")
+
+      dates, locations = trim_open_meteo_locations(aligned_dates, locations)
+      if len(dates) != OPEN_METEO_WINDOW_DAYS:
+        raise NoDataLoadedError(
+          f"Open-Meteo returned {len(dates)} days for {series['slug']}; "
+          f"expected {OPEN_METEO_WINDOW_DAYS}.",
+        )
+
+      return {
+        "metadata": {
+          "slug": series["slug"],
+          "title": series["title"],
+          "subtitle": series["subtitle"],
+          "source": source["provider"],
+          "sourceUrl": source["baseUrl"],
+          "dailyVariables": source["dailyVariables"],
+          "units": {
+            "temperature": "degC",
+            "relativeHumidity": "percent",
+            "precipitation": "mm",
+          },
+          "windowDays": OPEN_METEO_WINDOW_DAYS,
+          "startDate": dates[0],
+          "endDate": dates[-1],
+          "requestedStartDate": requested_start_date.isoformat(),
+          "requestedEndDate": requested_end_date.isoformat(),
+          "generatedAt": utc_now().replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        },
+        "dates": dates,
+        "locations": locations,
+      }
+    except HTTPError as error:
+      if error.code != 400:
+        raise
+      last_error = error
+
+  if last_error is not None:
+    raise last_error
+
+  raise NoDataLoadedError(f"No Open-Meteo data could be loaded for {series['slug']}.")
+
+
 def build_payload(series: dict[str, Any]) -> dict[str, Any]:
+  if series["kind"] == "multi-location-weather-story":
+    source_type = series["source"]["type"]
+    if source_type != "open-meteo-historical-window":
+      raise NotImplementedError(f"Unsupported source type: {source_type}")
+
+    return build_open_meteo_weather_story_payload(series)
+
   if series["kind"] != "seasonal-temperature-chart":
     raise NotImplementedError(f'Unsupported series kind: {series["kind"]}')
 
@@ -270,8 +456,14 @@ def build_payload(series: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
   catalog = load_catalog()
+  requested_slugs = set(sys.argv[1:])
+  processed_slugs: set[str] = set()
 
   for series in catalog["series"]:
+    if requested_slugs and series["slug"] not in requested_slugs:
+      continue
+
+    processed_slugs.add(series["slug"])
     output_path = ROOT / series["dataPath"]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -286,10 +478,11 @@ def main() -> int:
           f"No NOAA data loaded for {series['slug']} and the existing dataset is invalid.",
         ) from error
 
-      latest_data_date = existing_payload.get("metadata", {}).get("latestDataDate", "unknown")
+      metadata = existing_payload.get("metadata", {})
+      latest_data_date = metadata.get("latestDataDate") or metadata.get("endDate", "unknown")
       print(
-        f"No NOAA data loaded for {series['slug']}; keeping existing dataset at {output_path} "
-        f"(latestDataDate={latest_data_date}).",
+        f"No data loaded for {series['slug']}; keeping existing dataset at {output_path} "
+        f"(latestDate={latest_data_date}).",
         file=sys.stderr,
       )
       continue
@@ -299,6 +492,10 @@ def main() -> int:
       encoding="utf-8",
     )
     print(f"Wrote {output_path}")
+
+  missing_slugs = requested_slugs - processed_slugs
+  if missing_slugs:
+    raise RuntimeError(f"Unknown series slug(s): {', '.join(sorted(missing_slugs))}")
 
   return 0
 

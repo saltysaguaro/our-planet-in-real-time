@@ -29,6 +29,81 @@
           2020
         ]
       }
+    },
+    {
+      "slug": "year-to-date-weather-by-location",
+      "kind": "multi-location-weather-story",
+      "title": "Trailing 365-Day Daily Weather",
+      "subtitle": "Selected locations",
+      "summary": "Daily high and low temperature, mean relative humidity, and total precipitation for the trailing 365-day window ending on the previous day, updated from Open-Meteo historical weather data.",
+      "status": "Live now",
+      "pagePath": "series/year-to-date-weather-by-location/",
+      "dataPath": "data/series/year-to-date-weather-by-location.json",
+      "imageExportName": "year-to-date-weather-by-location",
+      "source": {
+        "type": "open-meteo-historical-window",
+        "provider": "Open-Meteo Historical Weather API",
+        "baseUrl": "https://archive-api.open-meteo.com/v1/archive",
+        "dailyVariables": [
+          "temperature_2m_max",
+          "temperature_2m_min",
+          "relative_humidity_2m_mean",
+          "precipitation_sum"
+        ],
+        "temperatureUnit": "celsius",
+        "precipitationUnit": "mm",
+        "locations": [
+          {
+            "id": "tucson-arizona",
+            "name": "Tucson, Arizona",
+            "latitude": 32.2226,
+            "longitude": -110.9747,
+            "timezone": "America/Phoenix"
+          },
+          {
+            "id": "cefalu-sicily",
+            "name": "Cefalu, Sicily",
+            "latitude": 38.0394,
+            "longitude": 14.0229,
+            "timezone": "Europe/Rome"
+          },
+          {
+            "id": "algiers-algeria",
+            "name": "Algiers, Algeria",
+            "latitude": 36.7538,
+            "longitude": 3.0588,
+            "timezone": "Africa/Algiers"
+          },
+          {
+            "id": "bergen-norway",
+            "name": "Bergen, Norway",
+            "latitude": 60.3913,
+            "longitude": 5.3221,
+            "timezone": "Europe/Oslo"
+          },
+          {
+            "id": "montpellier-france",
+            "name": "Montpellier, France",
+            "latitude": 43.6108,
+            "longitude": 3.8767,
+            "timezone": "Europe/Paris"
+          },
+          {
+            "id": "barcelona-spain",
+            "name": "Barcelona, Spain",
+            "latitude": 41.3874,
+            "longitude": 2.1686,
+            "timezone": "Europe/Madrid"
+          },
+          {
+            "id": "lausanne-switzerland",
+            "name": "Lausanne, Switzerland",
+            "latitude": 46.5197,
+            "longitude": 6.6323,
+            "timezone": "Europe/Zurich"
+          }
+        ]
+      }
     }
   ]
 }

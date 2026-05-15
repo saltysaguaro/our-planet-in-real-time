@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Loading weather story...</title>
+    <meta
+      name="description"
+      content="Trailing 365-day daily weather charts for predefined locations using Open-Meteo historical weather data."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../../assets/styles.css?v=weather-story-20260515" />
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
+    <script src="../../assets/weather-story.js?v=weather-story-20260515e" defer></script>
+  </head>
+  <body
+    class="weather-story-body"
+    data-base-path="../../"
+    data-series-slug="year-to-date-weather-by-location"
+  >
+    <main class="weather-story-shell">
+      <nav class="weather-story-nav" aria-label="Page navigation">
+        <a class="back-link" href="../../">All live pages</a>
+        <div id="weather-story-status" class="weather-story-status">Loading weather data...</div>
+      </nav>
+      <header class="weather-story-header">
+        <div id="weather-story-eyebrow" class="weather-story-eyebrow">Our Planet in Real-Time</div>
+        <h1 id="weather-story-title" class="weather-story-title">Trailing 365-Day Daily Weather</h1>
+        <p id="weather-story-summary" class="weather-story-summary">
+          Daily high and low temperature, mean humidity, and precipitation.
+        </p>
+      </header>
+      <section id="weather-story-charts" class="weather-story-charts" aria-label="Location weather charts"></section>
+    </main>
+  </body>
+</html>
