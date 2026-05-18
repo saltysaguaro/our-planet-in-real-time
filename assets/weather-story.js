@@ -35,7 +35,39 @@ function formatSignedCoordinate(value, positiveSuffix, negativeSuffix) {
   return `${Math.abs(value).toFixed(2)}°${suffix}`;
 }
 
-function createLocationSection(location) {
+function getStoryWindows(payload) {
+  if (Array.isArray(payload.metadata.windows) && payload.metadata.windows.length) {
+    return payload.metadata.windows;
+  }
+
+  return [
+    {
+      id: "current",
+      label: "Current",
+      kind: "trailing-365",
+      startDate: payload.metadata.startDate,
+      endDate: payload.metadata.endDate,
+      days: payload.metadata.windowDays,
+    },
+  ];
+}
+
+function getDefaultWindowId(payload, windows) {
+  return payload.metadata.defaultWindowId || windows[0].id;
+}
+
+function getLocationWindow(location, windowId, payload) {
+  if (location.windows && location.windows[windowId]) {
+    return location.windows[windowId];
+  }
+
+  return {
+    dates: payload.dates,
+    values: location.values,
+  };
+}
+
+function createLocationSection(location, windows, defaultWindowId) {
   const section = document.createElement("section");
   section.className = "weather-location-section";
 
@@ -53,20 +85,44 @@ function createLocationSection(location) {
     formatSignedCoordinate(location.longitude, "E", "W"),
   ].join(", ");
 
+  const controls = document.createElement("div");
+  controls.className = "weather-location-controls";
+
+  const selectorLabel = document.createElement("label");
+  selectorLabel.className = "weather-window-label";
+  selectorLabel.htmlFor = `weather-window-${location.id}`;
+  selectorLabel.textContent = "Period";
+
+  const selector = document.createElement("select");
+  selector.id = `weather-window-${location.id}`;
+  selector.className = "weather-window-select";
+  selector.setAttribute("aria-label", `Weather period for ${location.name}`);
+
+  windows.forEach((windowOption) => {
+    const option = document.createElement("option");
+    option.value = windowOption.id;
+    option.textContent = windowOption.label;
+    selector.append(option);
+  });
+  selector.value = defaultWindowId;
+
   const chart = document.createElement("div");
   chart.id = `weather-chart-${location.id}`;
   chart.className = "weather-location-chart";
   chart.setAttribute("aria-label", `${location.name} daily weather chart`);
 
-  heading.append(title, meta);
+  selectorLabel.append(selector);
+  controls.append(meta, selectorLabel);
+  heading.append(title, controls);
   section.append(heading, chart);
   chartsElement.append(section);
 
-  return chart;
+  return { chart, selector };
 }
 
-function buildLocationTraces(dates, location) {
-  const values = location.values;
+function buildLocationTraces(locationWindow) {
+  const dates = locationWindow.dates;
+  const values = locationWindow.values;
 
   return [
     {
@@ -81,7 +137,7 @@ function buildLocationTraces(dates, location) {
       yaxis: "y2",
       fill: "tozeroy",
       fillcolor: "rgba(77, 139, 69, 0.12)",
-      hovertemplate: "%{x|%b %-d}<br>Humidity: %{y:.0f}%<extra></extra>",
+      hovertemplate: "%{x|%b %-d, %Y}<br>Humidity: %{y:.0f}%<extra></extra>",
       line: {
         color: "rgba(77, 139, 69, 0)",
         width: 0,
@@ -96,7 +152,7 @@ function buildLocationTraces(dates, location) {
       y: values.precipitationSumMm,
       xaxis: "x",
       yaxis: "y3",
-      hovertemplate: "%{x|%b %-d}<br>Precipitation: %{y:.1f} mm<extra></extra>",
+      hovertemplate: "%{x|%b %-d, %Y}<br>Precipitation: %{y:.1f} mm<extra></extra>",
       marker: {
         color: "rgba(56, 112, 166, 0.7)",
       },
@@ -111,7 +167,7 @@ function buildLocationTraces(dates, location) {
       y: values.temperatureMaxC,
       xaxis: "x",
       yaxis: "y",
-      hovertemplate: "%{x|%b %-d}<br>High: %{y:.1f} °C<extra></extra>",
+      hovertemplate: "%{x|%b %-d, %Y}<br>High: %{y:.1f} °C<extra></extra>",
       line: {
         color: "#c84a2f",
         width: 2.3,
@@ -127,7 +183,7 @@ function buildLocationTraces(dates, location) {
       y: values.temperatureMinC,
       xaxis: "x",
       yaxis: "y",
-      hovertemplate: "%{x|%b %-d}<br>Low: %{y:.1f} °C<extra></extra>",
+      hovertemplate: "%{x|%b %-d, %Y}<br>Low: %{y:.1f} °C<extra></extra>",
       line: {
         color: "#287c9f",
         width: 2.1,
@@ -153,16 +209,19 @@ function valuesRange(values, step, padding, fallbackMaximum) {
 }
 
 function buildTemperatureRange(payload) {
-  const temperatureValues = payload.locations.flatMap((location) => ([
-    ...location.values.temperatureMaxC,
-    ...location.values.temperatureMinC,
-  ]));
+  const temperatureValues = payload.locations.flatMap((location) => {
+    const windows = location.windows ? Object.values(location.windows) : [getLocationWindow(location, "current", payload)];
+    return windows.flatMap((locationWindow) => ([
+      ...locationWindow.values.temperatureMaxC,
+      ...locationWindow.values.temperatureMinC,
+    ]));
+  });
   const [minimum] = valuesRange(temperatureValues, 5, 2, TEMPERATURE_AXIS_MAX_C);
   return [Math.min(0, minimum), TEMPERATURE_AXIS_MAX_C];
 }
 
-function buildLocationRanges(location, payload) {
-  const values = location.values;
+function buildLocationRanges(locationWindow, payload) {
+  const values = locationWindow.values;
   const precipitationRange = valuesRange(values.precipitationSumMm, 5, 1, 5);
   precipitationRange[0] = 0;
 
@@ -173,9 +232,10 @@ function buildLocationRanges(location, payload) {
   };
 }
 
-function buildLocationLayout(series, payload, location) {
-  const ranges = buildLocationRanges(location, payload);
-  const dateRange = [payload.metadata.startDate, payload.metadata.endDate];
+function buildLocationLayout(series, payload, locationWindow) {
+  const ranges = buildLocationRanges(locationWindow, payload);
+  const dates = locationWindow.dates || [];
+  const dateRange = [dates[0], dates[dates.length - 1]];
 
   return {
     paper_bgcolor: STORY_PAPER_COLOR,
@@ -334,6 +394,20 @@ function buildLocationConfig(series, location) {
   };
 }
 
+function getWindowDateText(windowOption) {
+  return `${storyDateFormat.format(asUtcDate(windowOption.startDate))} to ${storyDateFormat.format(asUtcDate(windowOption.endDate))}`;
+}
+
+function renderLocationChart(series, payload, entry, windowId) {
+  const locationWindow = getLocationWindow(entry.location, windowId, payload);
+  return Plotly.react(
+    entry.element,
+    buildLocationTraces(locationWindow),
+    buildLocationLayout(series, payload, locationWindow),
+    buildLocationConfig(series, entry.location),
+  );
+}
+
 async function loadWeatherCatalog() {
   const response = await fetch(`${storyBasePath}config/site.json`, { cache: "no-store" });
   if (!response.ok) {
@@ -365,30 +439,39 @@ async function renderWeatherStory() {
     }
 
     const payload = await loadWeatherDataset(series.dataPath);
-    const startDate = storyDateFormat.format(asUtcDate(payload.metadata.startDate));
-    const endDate = storyDateFormat.format(asUtcDate(payload.metadata.endDate));
+    const windows = getStoryWindows(payload);
+    const defaultWindowId = getDefaultWindowId(payload, windows);
+    const defaultWindow = windows.find((windowOption) => windowOption.id === defaultWindowId) || windows[0];
     const generatedAt = storyDateFormat.format(new Date(payload.metadata.generatedAt));
 
     document.title = `${series.title} - ${series.subtitle} | ${catalog.site.title}`;
     eyebrowElement.textContent = catalog.site.title;
     titleElement.textContent = series.title;
     summaryElement.textContent = series.summary;
-    statusElement.textContent = `${payload.metadata.windowDays} days: ${startDate} to ${endDate}; updated ${generatedAt}`;
+    statusElement.textContent = `${defaultWindow.label}: ${getWindowDateText(defaultWindow)}; updated ${generatedAt}`;
 
     chartsElement.innerHTML = "";
-    const chartEntries = payload.locations.map((location) => ({
-      location,
-      element: createLocationSection(location),
-    }));
+    const chartEntries = payload.locations.map((location) => {
+      const { chart, selector } = createLocationSection(location, windows, defaultWindowId);
+      const entry = {
+        location,
+        element: chart,
+        selector,
+        selectedWindowId: defaultWindowId,
+      };
 
-    await Promise.all(chartEntries.map(({ location, element }) => (
-      Plotly.newPlot(
-        element,
-        buildLocationTraces(payload.dates, location),
-        buildLocationLayout(series, payload, location),
-        buildLocationConfig(series, location),
-      )
-    )));
+      selector.addEventListener("change", () => {
+        entry.selectedWindowId = selector.value;
+        renderLocationChart(series, payload, entry, entry.selectedWindowId).catch((error) => {
+          statusElement.textContent = "Unable to update weather chart";
+          console.error(error);
+        });
+      });
+
+      return entry;
+    });
+
+    await Promise.all(chartEntries.map((entry) => renderLocationChart(series, payload, entry, entry.selectedWindowId)));
 
     window.addEventListener("resize", () => {
       chartEntries.forEach(({ element }) => Plotly.Plots.resize(element));

@@ -33,9 +33,9 @@
     {
       "slug": "year-to-date-weather-by-location",
       "kind": "multi-location-weather-story",
-      "title": "Trailing 365-Day Daily Weather",
-      "subtitle": "Selected locations",
-      "summary": "Daily high and low temperature, mean relative humidity, and total precipitation for the trailing 365-day window ending on the previous day, updated from Open-Meteo historical weather data.",
+      "title": "Daily Weather by Location",
+      "subtitle": "Current and prior years",
+      "summary": "Daily high and low temperature, mean relative humidity, and total precipitation for selectable current and calendar-year periods, updated from Open-Meteo historical weather data.",
       "status": "Live now",
       "pagePath": "series/year-to-date-weather-by-location/",
       "dataPath": "data/series/year-to-date-weather-by-location.json",

@@ -26,6 +26,7 @@ BASE_RETRY_DELAY_SECONDS = 1.5
 RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
 OPEN_METEO_END_DATE_BACKOFF_DAYS = 14
 OPEN_METEO_WINDOW_DAYS = 365
+OPEN_METEO_PRIOR_YEAR_COUNT = 10
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config" / "site.json"
 
@@ -325,115 +326,207 @@ def extract_open_meteo_location_values(
   }
 
 
-def trim_open_meteo_locations(
+def build_open_meteo_windows(now_date: date) -> list[dict[str, Any]]:
+  current_end_date = now_date - timedelta(days=1)
+  current_start_date = current_end_date - timedelta(days=OPEN_METEO_WINDOW_DAYS - 1)
+  windows = [
+    {
+      "id": "current",
+      "label": "Current",
+      "kind": "trailing-365",
+      "startDate": current_start_date,
+      "endDate": current_end_date,
+      "days": OPEN_METEO_WINDOW_DAYS,
+      "requestedStartDate": current_start_date,
+      "requestedEndDate": current_end_date,
+    },
+  ]
+
+  for year in range(now_date.year - 1, now_date.year - OPEN_METEO_PRIOR_YEAR_COUNT - 1, -1):
+    start_date = date(year, 1, 1)
+    end_date = date(year, 12, 31)
+    windows.append({
+      "id": str(year),
+      "label": str(year),
+      "kind": "calendar-year",
+      "startDate": start_date,
+      "endDate": end_date,
+      "days": (end_date - start_date).days + 1,
+    })
+
+  return windows
+
+
+def serialize_open_meteo_window(window: dict[str, Any]) -> dict[str, Any]:
+  serialized = {
+    "id": window["id"],
+    "label": window["label"],
+    "kind": window["kind"],
+    "startDate": window["startDate"].isoformat(),
+    "endDate": window["endDate"].isoformat(),
+    "days": window["days"],
+  }
+
+  requested_start_date = window.get("requestedStartDate")
+  requested_end_date = window.get("requestedEndDate")
+  if requested_start_date is not None and requested_end_date is not None:
+    serialized["requestedStartDate"] = requested_start_date.isoformat()
+    serialized["requestedEndDate"] = requested_end_date.isoformat()
+
+  return serialized
+
+
+def validate_open_meteo_window_values(
+  series_slug: str,
+  window: dict[str, Any],
+  location_values: dict[str, Any],
   dates: list[str],
-  locations: list[dict[str, Any]],
-) -> tuple[list[str], list[dict[str, Any]]]:
-  last_valid_indices: list[int] = []
+) -> None:
+  if len(dates) != window["days"]:
+    raise NoDataLoadedError(
+      f"Open-Meteo returned {len(dates)} days for {series_slug} "
+      f"{window['label']}; expected {window['days']}.",
+    )
 
-  for location in locations:
-    values = location["values"]
-    last_valid_index = -1
+  values = location_values["values"]
+  for key, value_series in values.items():
+    if len(value_series) != len(dates):
+      raise NoDataLoadedError(
+        f"Open-Meteo returned {len(value_series)} {key} values for "
+        f"{location_values['name']} {window['label']}; expected {len(dates)}.",
+      )
 
-    for index in range(len(dates) - 1, -1, -1):
-      if any(values[key][index] is not None for key in values):
-        last_valid_index = index
-        break
-
-    if last_valid_index == -1:
-      raise NoDataLoadedError(f"No Open-Meteo data loaded for {location['name']}.")
-
-    last_valid_indices.append(last_valid_index)
-
-  final_index = min(last_valid_indices)
-  trimmed_dates = dates[: final_index + 1]
-  trimmed_locations: list[dict[str, Any]] = []
-
-  for location in locations:
-    trimmed_location = {
-      **location,
-      "values": {
-        key: values[: final_index + 1]
-        for key, values in location["values"].items()
-      },
-    }
-    trimmed_locations.append(trimmed_location)
-
-  return trimmed_dates, trimmed_locations
+  if not any(value is not None for value_series in values.values() for value in value_series):
+    raise NoDataLoadedError(f"No Open-Meteo data loaded for {location_values['name']} {window['label']}.")
 
 
-def build_open_meteo_weather_story_payload(series: dict[str, Any]) -> dict[str, Any]:
-  source = series["source"]
-  requested_end_date = utc_now().date() - timedelta(days=1)
-  requested_start_date = requested_end_date - timedelta(days=OPEN_METEO_WINDOW_DAYS - 1)
-  locations_config = source.get("locations") or []
-
-  if not locations_config:
-    raise ValueError(f"No locations configured for {series['slug']}.")
-
+def fetch_open_meteo_window(
+  series_slug: str,
+  source: dict[str, Any],
+  locations_config: list[dict[str, Any]],
+  window: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
+  candidate_offsets = range(OPEN_METEO_END_DATE_BACKOFF_DAYS + 1) if window["id"] == "current" else range(1)
   last_error: HTTPError | None = None
 
-  for day_offset in range(OPEN_METEO_END_DATE_BACKOFF_DAYS + 1):
-    end_date = requested_end_date - timedelta(days=day_offset)
-    start_date = end_date - timedelta(days=OPEN_METEO_WINDOW_DAYS - 1)
+  for day_offset in candidate_offsets:
+    candidate_window = dict(window)
+    if day_offset:
+      end_date = window["endDate"] - timedelta(days=day_offset)
+      candidate_window["endDate"] = end_date
+      candidate_window["startDate"] = end_date - timedelta(days=window["days"] - 1)
 
     try:
       aligned_dates: list[str] | None = None
       locations: list[dict[str, Any]] = []
 
       for location in locations_config:
-        response = fetch_open_meteo_location(source, location, start_date, end_date)
+        response = fetch_open_meteo_location(
+          source,
+          location,
+          candidate_window["startDate"],
+          candidate_window["endDate"],
+        )
         dates, location_values = extract_open_meteo_location_values(location, response)
+
+        validate_open_meteo_window_values(series_slug, candidate_window, location_values, dates)
 
         if aligned_dates is None:
           aligned_dates = dates
         elif dates != aligned_dates:
-          raise RuntimeError(f"Open-Meteo returned misaligned dates for {location['name']}.")
+          raise RuntimeError(
+            f"Open-Meteo returned misaligned dates for {location['name']} {candidate_window['label']}.",
+          )
 
         locations.append(location_values)
 
       if not aligned_dates:
-        raise NoDataLoadedError("No Open-Meteo dates loaded.")
+        raise NoDataLoadedError(f"No Open-Meteo dates loaded for {series_slug} {candidate_window['label']}.")
 
-      dates, locations = trim_open_meteo_locations(aligned_dates, locations)
-      if len(dates) != OPEN_METEO_WINDOW_DAYS:
-        raise NoDataLoadedError(
-          f"Open-Meteo returned {len(dates)} days for {series['slug']}; "
-          f"expected {OPEN_METEO_WINDOW_DAYS}.",
-        )
-
-      return {
-        "metadata": {
-          "slug": series["slug"],
-          "title": series["title"],
-          "subtitle": series["subtitle"],
-          "source": source["provider"],
-          "sourceUrl": source["baseUrl"],
-          "dailyVariables": source["dailyVariables"],
-          "units": {
-            "temperature": "degC",
-            "relativeHumidity": "percent",
-            "precipitation": "mm",
-          },
-          "windowDays": OPEN_METEO_WINDOW_DAYS,
-          "startDate": dates[0],
-          "endDate": dates[-1],
-          "requestedStartDate": requested_start_date.isoformat(),
-          "requestedEndDate": requested_end_date.isoformat(),
-          "generatedAt": utc_now().replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        },
-        "dates": dates,
-        "locations": locations,
-      }
+      candidate_window["startDate"] = date.fromisoformat(aligned_dates[0])
+      candidate_window["endDate"] = date.fromisoformat(aligned_dates[-1])
+      return candidate_window, aligned_dates, locations
     except HTTPError as error:
-      if error.code != 400:
+      if window["id"] != "current" or error.code != 400:
         raise
       last_error = error
 
   if last_error is not None:
     raise last_error
 
-  raise NoDataLoadedError(f"No Open-Meteo data could be loaded for {series['slug']}.")
+  raise NoDataLoadedError(f"No Open-Meteo data loaded for {series_slug} {window['label']}.")
+
+
+def build_open_meteo_weather_story_payload(series: dict[str, Any]) -> dict[str, Any]:
+  source = series["source"]
+  windows = build_open_meteo_windows(utc_now().date())
+  locations_config = source.get("locations") or []
+
+  if not locations_config:
+    raise ValueError(f"No locations configured for {series['slug']}.")
+
+  locations_by_id: dict[str, dict[str, Any]] = {}
+  resolved_windows: list[dict[str, Any]] = []
+  default_window: dict[str, Any] | None = None
+
+  for window in windows:
+    resolved_window, dates, window_locations = fetch_open_meteo_window(
+      series["slug"],
+      source,
+      locations_config,
+      window,
+    )
+    resolved_windows.append(resolved_window)
+    if resolved_window["id"] == "current":
+      default_window = resolved_window
+
+    for location_values in window_locations:
+      location_entry = locations_by_id.setdefault(
+        location_values["id"],
+        {
+          "id": location_values["id"],
+          "name": location_values["name"],
+          "latitude": location_values["latitude"],
+          "longitude": location_values["longitude"],
+          "timezone": location_values["timezone"],
+          "grid": location_values["grid"],
+          "windows": {},
+        },
+      )
+      location_entry["windows"][resolved_window["id"]] = {
+        "dates": dates,
+        "values": location_values["values"],
+      }
+
+  if default_window is None:
+    raise NoDataLoadedError(f"No current Open-Meteo data could be loaded for {series['slug']}.")
+
+  locations = [locations_by_id[location["id"]] for location in locations_config]
+
+  return {
+    "metadata": {
+      "slug": series["slug"],
+      "title": series["title"],
+      "subtitle": series["subtitle"],
+      "source": source["provider"],
+      "sourceUrl": source["baseUrl"],
+      "dailyVariables": source["dailyVariables"],
+      "units": {
+        "temperature": "degC",
+        "relativeHumidity": "percent",
+        "precipitation": "mm",
+      },
+      "defaultWindowId": "current",
+      "windowDays": default_window["days"],
+      "startDate": default_window["startDate"].isoformat(),
+      "endDate": default_window["endDate"].isoformat(),
+      "requestedStartDate": default_window["requestedStartDate"].isoformat(),
+      "requestedEndDate": default_window["requestedEndDate"].isoformat(),
+      "windows": [serialize_open_meteo_window(window) for window in resolved_windows],
+      "generatedAt": utc_now().replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    },
+    "locations": locations,
+  }
 
 
 def build_payload(series: dict[str, Any]) -> dict[str, Any]:
