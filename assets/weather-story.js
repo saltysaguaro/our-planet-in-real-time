@@ -67,6 +67,15 @@ function getLocationWindow(location, windowId, payload) {
   };
 }
 
+function getAnnualPrecipitationHistory(location) {
+  const history = location.annualPrecipitation;
+  if (!history || !Array.isArray(history.years) || !Array.isArray(history.precipitationSumMm)) {
+    return null;
+  }
+
+  return history;
+}
+
 function createLocationSection(location, windows, defaultWindowId) {
   const section = document.createElement("section");
   section.className = "weather-location-section";
@@ -111,13 +120,31 @@ function createLocationSection(location, windows, defaultWindowId) {
   chart.className = "weather-location-chart";
   chart.setAttribute("aria-label", `${location.name} daily weather chart`);
 
+  const annualHistory = getAnnualPrecipitationHistory(location);
+  const annualHeading = document.createElement("div");
+  annualHeading.className = "weather-annual-heading";
+
+  const annualTitle = document.createElement("h3");
+  annualTitle.className = "weather-annual-title";
+  annualTitle.textContent = "Annual precipitation";
+
+  const annualMeta = document.createElement("div");
+  annualMeta.className = "weather-annual-meta";
+  annualMeta.textContent = annualHistory ? `${annualHistory.startYear}-${annualHistory.endYear}` : "No annual data";
+
+  const annualChart = document.createElement("div");
+  annualChart.id = `weather-annual-chart-${location.id}`;
+  annualChart.className = "weather-annual-chart";
+  annualChart.setAttribute("aria-label", `${location.name} total annual precipitation chart`);
+
   selectorLabel.append(selector);
   controls.append(meta, selectorLabel);
   heading.append(title, controls);
-  section.append(heading, chart);
+  annualHeading.append(annualTitle, annualMeta);
+  section.append(heading, chart, annualHeading, annualChart);
   chartsElement.append(section);
 
-  return { chart, selector };
+  return { chart, annualChart, selector };
 }
 
 function buildLocationTraces(locationWindow) {
@@ -192,6 +219,28 @@ function buildLocationTraces(locationWindow) {
   ];
 }
 
+function buildAnnualPrecipitationTraces(location) {
+  const history = getAnnualPrecipitationHistory(location);
+  const years = history ? history.years : [];
+  const totals = history ? history.precipitationSumMm : [];
+
+  return [
+    {
+      type: "bar",
+      name: "Annual precipitation",
+      x: years,
+      y: totals,
+      hovertemplate: "%{x}<br>Total precipitation: %{y:.0f} mm<extra></extra>",
+      marker: {
+        color: "rgba(56, 112, 166, 0.72)",
+        line: {
+          width: 0,
+        },
+      },
+    },
+  ];
+}
+
 function valuesRange(values, step, padding, fallbackMaximum) {
   const finiteValues = values.filter((value) => Number.isFinite(value));
   if (!finiteValues.length) {
@@ -220,6 +269,19 @@ function buildTemperatureRange(payload) {
   return [Math.min(0, minimum), TEMPERATURE_AXIS_MAX_C];
 }
 
+function buildAnnualPrecipitationRange(location) {
+  const history = getAnnualPrecipitationHistory(location);
+  const annualValues = history ? history.precipitationSumMm : [];
+  const finiteValues = annualValues.filter((value) => Number.isFinite(value));
+  if (!finiteValues.length) {
+    return [0, 100];
+  }
+
+  const maximum = Math.max(...finiteValues);
+  const step = maximum > 2500 ? 500 : maximum > 1000 ? 250 : maximum > 500 ? 100 : 50;
+  return [0, Math.ceil((maximum * 1.06) / step) * step];
+}
+
 function buildLocationRanges(locationWindow, payload) {
   const values = locationWindow.values;
   const precipitationRange = valuesRange(values.precipitationSumMm, 5, 1, 5);
@@ -229,6 +291,54 @@ function buildLocationRanges(locationWindow, payload) {
     temperatureC: buildTemperatureRange(payload),
     relativeHumidityPct: [0, 100],
     precipitationMm: precipitationRange,
+  };
+}
+
+function buildAnnualPrecipitationLayout(location) {
+  return {
+    paper_bgcolor: STORY_PAPER_COLOR,
+    plot_bgcolor: STORY_PLOT_COLOR,
+    margin: {
+      l: 58,
+      r: 28,
+      t: 16,
+      b: 48,
+    },
+    font: {
+      family: "'IBM Plex Sans', sans-serif",
+      color: STORY_TEXT_COLOR,
+      size: 13,
+    },
+    hovermode: "x",
+    dragmode: false,
+    showlegend: false,
+    bargap: 0.22,
+    xaxis: {
+      title: {
+        text: "Year",
+        standoff: 8,
+      },
+      tickformat: "d",
+      tickfont: {
+        size: 12,
+      },
+      linecolor: STORY_AXIS_COLOR,
+      gridcolor: "rgba(47, 42, 32, 0)",
+      zeroline: false,
+      fixedrange: true,
+    },
+    yaxis: {
+      range: buildAnnualPrecipitationRange(location),
+      title: {
+        text: "Total annual precipitation (mm)",
+        standoff: 8,
+      },
+      tickformat: ".0f",
+      linecolor: STORY_AXIS_COLOR,
+      gridcolor: STORY_GRID_COLOR,
+      zerolinecolor: "rgba(47, 42, 32, 0.18)",
+      fixedrange: true,
+    },
   };
 }
 
@@ -408,6 +518,21 @@ function renderLocationChart(series, payload, entry, windowId) {
   );
 }
 
+function renderAnnualPrecipitationChart(entry) {
+  return Plotly.react(
+    entry.annualElement,
+    buildAnnualPrecipitationTraces(entry.location),
+    buildAnnualPrecipitationLayout(entry.location),
+    {
+      responsive: true,
+      displayModeBar: false,
+      displaylogo: false,
+      scrollZoom: false,
+      doubleClick: false,
+    },
+  );
+}
+
 async function loadWeatherCatalog() {
   const response = await fetch(`${storyBasePath}config/site.json`, { cache: "no-store" });
   if (!response.ok) {
@@ -452,10 +577,11 @@ async function renderWeatherStory() {
 
     chartsElement.innerHTML = "";
     const chartEntries = payload.locations.map((location) => {
-      const { chart, selector } = createLocationSection(location, windows, defaultWindowId);
+      const { chart, annualChart, selector } = createLocationSection(location, windows, defaultWindowId);
       const entry = {
         location,
         element: chart,
+        annualElement: annualChart,
         selector,
         selectedWindowId: defaultWindowId,
       };
@@ -471,10 +597,16 @@ async function renderWeatherStory() {
       return entry;
     });
 
-    await Promise.all(chartEntries.map((entry) => renderLocationChart(series, payload, entry, entry.selectedWindowId)));
+    await Promise.all(chartEntries.flatMap((entry) => [
+      renderLocationChart(series, payload, entry, entry.selectedWindowId),
+      renderAnnualPrecipitationChart(entry),
+    ]));
 
     window.addEventListener("resize", () => {
-      chartEntries.forEach(({ element }) => Plotly.Plots.resize(element));
+      chartEntries.forEach(({ element, annualElement }) => {
+        Plotly.Plots.resize(element);
+        Plotly.Plots.resize(annualElement);
+      });
     });
   } catch (error) {
     statusElement.textContent = "Unable to load weather story";

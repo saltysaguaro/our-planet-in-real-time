@@ -415,6 +415,33 @@ body.weather-story-body {
   height: clamp(465px, 54vh, 585px);
 }
 
+.weather-annual-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 0 4px;
+}
+
+.weather-annual-title {
+  margin: 0;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: clamp(1.02rem, 1.35vw, 1.24rem);
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+
+.weather-annual-meta {
+  color: var(--muted);
+  font-size: 0.88rem;
+  white-space: nowrap;
+}
+
+.weather-annual-chart {
+  width: 100%;
+  height: clamp(260px, 32vh, 350px);
+}
+
 @media (max-width: 720px) {
   .weather-story-shell {
     padding: 12px 10px 28px;
@@ -445,5 +472,19 @@ body.weather-story-body {
 
   .weather-location-chart {
     height: 570px;
+  }
+
+  .weather-annual-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .weather-annual-meta {
+    white-space: normal;
+  }
+
+  .weather-annual-chart {
+    height: 360px;
   }
 }

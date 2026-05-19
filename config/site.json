@@ -35,7 +35,7 @@
       "kind": "multi-location-weather-story",
       "title": "Daily Weather by Location",
       "subtitle": "Current and prior years",
-      "summary": "Daily high and low temperature, mean relative humidity, and total precipitation for selectable current and calendar-year periods, updated from Open-Meteo historical weather data.",
+      "summary": "Daily high and low temperature, mean relative humidity, total precipitation, and annual precipitation history for selectable current and calendar-year periods, updated from Open-Meteo historical weather data.",
       "status": "Live now",
       "pagePath": "series/year-to-date-weather-by-location/",
       "dataPath": "data/series/year-to-date-weather-by-location.json",
@@ -52,6 +52,7 @@
         ],
         "temperatureUnit": "celsius",
         "precipitationUnit": "mm",
+        "annualHistoryStartYear": 1940,
         "locations": [
           {
             "id": "tucson-arizona",

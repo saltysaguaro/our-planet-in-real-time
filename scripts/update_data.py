@@ -21,12 +21,15 @@ from urllib.request import Request, urlopen
 
 ANCHOR_YEAR = 2000
 MAX_WORKERS = 16
-FETCH_RETRIES = 3
+FETCH_RETRIES = 8
 BASE_RETRY_DELAY_SECONDS = 1.5
 RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
+RATE_LIMIT_RETRY_DELAY_SECONDS = 30
 OPEN_METEO_END_DATE_BACKOFF_DAYS = 14
 OPEN_METEO_WINDOW_DAYS = 365
 OPEN_METEO_PRIOR_YEAR_COUNT = 10
+OPEN_METEO_ANNUAL_HISTORY_START_YEAR = 1940
+OPEN_METEO_ANNUAL_HISTORY_CHUNK_YEARS = 100
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config" / "site.json"
 
@@ -77,7 +80,19 @@ def fetch_url(url: str) -> str:
       last_error = error
 
     if attempt < FETCH_RETRIES - 1:
-      time.sleep(BASE_RETRY_DELAY_SECONDS * (2**attempt))
+      retry_after = None
+      if isinstance(last_error, HTTPError) and last_error.code == 429:
+        retry_after_header = last_error.headers.get("Retry-After")
+        if retry_after_header:
+          try:
+            retry_after = float(retry_after_header)
+          except ValueError:
+            retry_after = None
+
+      if isinstance(last_error, HTTPError) and last_error.code == 429:
+        time.sleep(retry_after or RATE_LIMIT_RETRY_DELAY_SECONDS)
+      else:
+        time.sleep(BASE_RETRY_DELAY_SECONDS * (2**attempt))
 
   if last_error is not None:
     raise last_error
@@ -277,13 +292,14 @@ def fetch_open_meteo_location(
   location: dict[str, Any],
   start_date: date,
   end_date: date,
+  daily_variables: list[str] | None = None,
 ) -> dict[str, Any]:
   params = {
     "latitude": location["latitude"],
     "longitude": location["longitude"],
     "start_date": start_date.isoformat(),
     "end_date": end_date.isoformat(),
-    "daily": ",".join(source["dailyVariables"]),
+    "daily": ",".join(daily_variables or source["dailyVariables"]),
     "timezone": location.get("timezone", "auto"),
     "temperature_unit": source.get("temperatureUnit", "celsius"),
     "precipitation_unit": source.get("precipitationUnit", "mm"),
@@ -457,10 +473,201 @@ def fetch_open_meteo_window(
   raise NoDataLoadedError(f"No Open-Meteo data loaded for {series_slug} {window['label']}.")
 
 
-def build_open_meteo_weather_story_payload(series: dict[str, Any]) -> dict[str, Any]:
+def iter_year_chunks(start_year: int, end_year: int) -> Iterable[tuple[int, int]]:
+  chunk_start = start_year
+  while chunk_start <= end_year:
+    chunk_end = min(end_year, chunk_start + OPEN_METEO_ANNUAL_HISTORY_CHUNK_YEARS - 1)
+    yield chunk_start, chunk_end
+    chunk_start = chunk_end + 1
+
+
+def extract_open_meteo_annual_precipitation(
+  response: dict[str, Any],
+  start_year: int,
+  end_year: int,
+) -> list[dict[str, Any]]:
+  daily = response.get("daily") or {}
+  dates = daily.get("time") or []
+  precipitation = daily.get("precipitation_sum") or []
+  totals = {year: 0.0 for year in range(start_year, end_year + 1)}
+  date_counts = {year: 0 for year in range(start_year, end_year + 1)}
+  valid_counts = {year: 0 for year in range(start_year, end_year + 1)}
+
+  for index, date_text in enumerate(dates):
+    year = int(date_text[:4])
+    if year < start_year or year > end_year:
+      continue
+
+    date_counts[year] += 1
+    if index >= len(precipitation) or precipitation[index] is None:
+      continue
+
+    value = float(precipitation[index])
+    if math.isnan(value):
+      continue
+
+    totals[year] += value
+    valid_counts[year] += 1
+
+  annual_values = []
+  for year in range(start_year, end_year + 1):
+    expected_day_count = 366 if calendar_module.isleap(year) else 365
+    if date_counts[year] != expected_day_count or valid_counts[year] != expected_day_count:
+      continue
+
+    annual_values.append({
+      "year": year,
+      "precipitationSumMm": round(totals[year], 1),
+      "validDayCount": valid_counts[year],
+      "expectedDayCount": expected_day_count,
+    })
+
+  return annual_values
+
+
+def fetch_open_meteo_annual_precipitation_chunk(
+  source: dict[str, Any],
+  location: dict[str, Any],
+  start_year: int,
+  end_year: int,
+) -> list[dict[str, Any]]:
+  response = fetch_open_meteo_location(
+    source,
+    location,
+    date(start_year, 1, 1),
+    date(end_year, 12, 31),
+    daily_variables=["precipitation_sum"],
+  )
+  return extract_open_meteo_annual_precipitation(response, start_year, end_year)
+
+
+def fetch_open_meteo_annual_precipitation_with_fallback(
+  source: dict[str, Any],
+  location: dict[str, Any],
+  start_year: int,
+  end_year: int,
+) -> list[dict[str, Any]]:
+  try:
+    return fetch_open_meteo_annual_precipitation_chunk(source, location, start_year, end_year)
+  except HTTPError as error:
+    if error.code != 400:
+      raise
+    if start_year == end_year:
+      return []
+
+  midpoint_year = (start_year + end_year) // 2
+  return [
+    *fetch_open_meteo_annual_precipitation_with_fallback(source, location, start_year, midpoint_year),
+    *fetch_open_meteo_annual_precipitation_with_fallback(source, location, midpoint_year + 1, end_year),
+  ]
+
+
+def annual_precipitation_history_records(
+  history: dict[str, Any] | None,
+  end_year: int,
+) -> list[dict[str, Any]]:
+  if not history:
+    return []
+
+  years = history.get("years") or []
+  totals = history.get("precipitationSumMm") or []
+  valid_day_counts = history.get("validDayCounts") or []
+  expected_day_counts = history.get("expectedDayCounts") or []
+  records_by_year: dict[int, dict[str, Any]] = {}
+
+  for index, raw_year in enumerate(years):
+    if index >= len(totals) or totals[index] is None:
+      continue
+
+    year = int(raw_year)
+    if year > end_year:
+      continue
+
+    expected_day_count = (
+      int(expected_day_counts[index])
+      if index < len(expected_day_counts)
+      else 366 if calendar_module.isleap(year) else 365
+    )
+    valid_day_count = (
+      int(valid_day_counts[index])
+      if index < len(valid_day_counts)
+      else expected_day_count
+    )
+
+    if valid_day_count != expected_day_count:
+      continue
+
+    records_by_year[year] = {
+      "year": year,
+      "precipitationSumMm": round(float(totals[index]), 1),
+      "validDayCount": valid_day_count,
+      "expectedDayCount": expected_day_count,
+    }
+
+  return [records_by_year[year] for year in sorted(records_by_year)]
+
+
+def serialize_annual_precipitation_history(annual_values: list[dict[str, Any]]) -> dict[str, Any]:
+  return {
+    "startYear": annual_values[0]["year"],
+    "endYear": annual_values[-1]["year"],
+    "years": [item["year"] for item in annual_values],
+    "precipitationSumMm": [item["precipitationSumMm"] for item in annual_values],
+    "validDayCounts": [item["validDayCount"] for item in annual_values],
+    "expectedDayCounts": [item["expectedDayCount"] for item in annual_values],
+  }
+
+
+def build_open_meteo_annual_precipitation_history(
+  source: dict[str, Any],
+  location: dict[str, Any],
+  end_year: int,
+  existing_history: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+  start_year = int(source.get("annualHistoryStartYear", OPEN_METEO_ANNUAL_HISTORY_START_YEAR))
+  annual_values = annual_precipitation_history_records(existing_history, end_year)
+  fetch_start_year = max((item["year"] for item in annual_values), default=start_year - 1) + 1
+
+  if fetch_start_year <= end_year:
+    for chunk_start, chunk_end in iter_year_chunks(fetch_start_year, end_year):
+      annual_values.extend(fetch_open_meteo_annual_precipitation_with_fallback(
+        source,
+        location,
+        chunk_start,
+        chunk_end,
+      ))
+      time.sleep(0.2)
+
+    annual_values.sort(key=lambda item: item["year"])
+
+  if not annual_values:
+    raise NoDataLoadedError(f"No annual precipitation history loaded for {location['name']}.")
+
+  return serialize_annual_precipitation_history(annual_values)
+
+
+def existing_location_annual_precipitation(
+  existing_payload: dict[str, Any] | None,
+  location_id: str,
+) -> dict[str, Any] | None:
+  if not existing_payload:
+    return None
+
+  for location in existing_payload.get("locations", []):
+    if location.get("id") == location_id:
+      return location.get("annualPrecipitation")
+
+  return None
+
+
+def build_open_meteo_weather_story_payload(
+  series: dict[str, Any],
+  existing_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
   source = series["source"]
   windows = build_open_meteo_windows(utc_now().date())
   locations_config = source.get("locations") or []
+  annual_precipitation_end_year = utc_now().year - 1
 
   if not locations_config:
     raise ValueError(f"No locations configured for {series['slug']}.")
@@ -498,6 +705,14 @@ def build_open_meteo_weather_story_payload(series: dict[str, Any]) -> dict[str, 
         "values": location_values["values"],
       }
 
+  for location in locations_config:
+    locations_by_id[location["id"]]["annualPrecipitation"] = build_open_meteo_annual_precipitation_history(
+      source,
+      location,
+      annual_precipitation_end_year,
+      existing_location_annual_precipitation(existing_payload, location["id"]),
+    )
+
   if default_window is None:
     raise NoDataLoadedError(f"No current Open-Meteo data could be loaded for {series['slug']}.")
 
@@ -523,19 +738,24 @@ def build_open_meteo_weather_story_payload(series: dict[str, Any]) -> dict[str, 
       "requestedStartDate": default_window["requestedStartDate"].isoformat(),
       "requestedEndDate": default_window["requestedEndDate"].isoformat(),
       "windows": [serialize_open_meteo_window(window) for window in resolved_windows],
+      "annualPrecipitationStartYear": source.get(
+        "annualHistoryStartYear",
+        OPEN_METEO_ANNUAL_HISTORY_START_YEAR,
+      ),
+      "annualPrecipitationEndYear": annual_precipitation_end_year,
       "generatedAt": utc_now().replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     },
     "locations": locations,
   }
 
 
-def build_payload(series: dict[str, Any]) -> dict[str, Any]:
+def build_payload(series: dict[str, Any], existing_payload: dict[str, Any] | None = None) -> dict[str, Any]:
   if series["kind"] == "multi-location-weather-story":
     source_type = series["source"]["type"]
     if source_type != "open-meteo-historical-window":
       raise NotImplementedError(f"Unsupported source type: {source_type}")
 
-    return build_open_meteo_weather_story_payload(series)
+    return build_open_meteo_weather_story_payload(series, existing_payload)
 
   if series["kind"] != "seasonal-temperature-chart":
     raise NotImplementedError(f'Unsupported series kind: {series["kind"]}')
@@ -559,17 +779,18 @@ def main() -> int:
     processed_slugs.add(series["slug"])
     output_path = ROOT / series["dataPath"]
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-      payload = build_payload(series)
-    except NoDataLoadedError:
-      if not output_path.exists():
-        raise
+    existing_payload: dict[str, Any] | None = None
+    if output_path.exists():
       try:
         existing_payload = json.loads(output_path.read_text(encoding="utf-8"))
-      except json.JSONDecodeError as error:
-        raise RuntimeError(
-          f"No NOAA data loaded for {series['slug']} and the existing dataset is invalid.",
-        ) from error
+      except json.JSONDecodeError:
+        existing_payload = None
+
+    try:
+      payload = build_payload(series, existing_payload)
+    except NoDataLoadedError:
+      if existing_payload is None:
+        raise
 
       metadata = existing_payload.get("metadata", {})
       latest_data_date = metadata.get("latestDataDate") or metadata.get("endDate", "unknown")
