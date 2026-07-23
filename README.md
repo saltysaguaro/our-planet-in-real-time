@@ -4,7 +4,6 @@ A GitHub Pages repository for a growing collection of live climate graphics.
 
 Published pages:
 
-- `Southwest U.S. / Daily Maximum Temperature`
 - `Selected locations / Trailing 365-Day Daily Weather`
 
 ## Repository shape
@@ -20,7 +19,7 @@ This keeps the first page simple to launch now while leaving room to add more pa
 
 ## Data freshness
 
-The site checks public data sources every hour and republishes automatically when new data appears. NOAA `nClimGrid-Daily` and Open-Meteo historical weather releases can lag real-time observations, so these are near-live daily pages rather than literal real-time sensor feeds.
+The site checks Open-Meteo every hour and republishes automatically when new data appears. Historical weather releases can lag real-time observations, so these are near-live daily pages rather than literal real-time sensor feeds.
 
 ## Run locally
 
