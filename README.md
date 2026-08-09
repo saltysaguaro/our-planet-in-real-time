@@ -19,7 +19,7 @@ This keeps the first page simple to launch now while leaving room to add more pa
 
 ## Data freshness
 
-The site checks Open-Meteo every hour and republishes automatically when new data appears. Historical weather releases can lag real-time observations, so these are near-live daily pages rather than literal real-time sensor feeds.
+The site checks Open-Meteo once per day at 17:17 UTC and republishes automatically. Historical weather releases can lag real-time observations, so these are near-live daily pages rather than literal real-time sensor feeds.
 
 ## Run locally
 

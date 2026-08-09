@@ -3,7 +3,8 @@ name: Update Live Data
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 * * * *"
+    # Run daily at 17:17 UTC (10:17 AM America/Phoenix).
+    - cron: "17 17 * * *"
 
 permissions:
   contents: write
