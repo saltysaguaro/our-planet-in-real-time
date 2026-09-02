@@ -13,10 +13,8 @@ URL = "https://opendap.nccs.nasa.gov/dods/GEOS-5/fp/0.25_deg/seamless/tavg3_2d_a
 
 
 def decode_grads_time(values: np.ndarray) -> list[datetime]:
-    # GDS exposes DAP time as ordinal-like days since 0001-01-01 00:00.
-    # Python's fromordinal(1) is 0001-01-01, so subtract one day.
     epoch = datetime(1, 1, 1, tzinfo=timezone.utc)
-    return [epoch + timedelta(days=float(v) - 1.0) for v in values]
+    return [epoch + timedelta(days=float(v) - 2.0) for v in values]
 
 
 def main() -> None:
@@ -25,8 +23,13 @@ def main() -> None:
     ds = open_url(URL, protocol="dap2")
     report.append("variables=" + ",".join(sorted(ds.keys())))
 
-    t_raw = np.asarray(ds["time"][:].data, dtype=float)
+    time_var = ds["time"]
+    t_raw = np.asarray(time_var[:].data, dtype=float)
     times = decode_grads_time(t_raw)
+    report.append(f"time_attributes={dict(time_var.attributes)!r}")
+    report.append(f"time_raw_first={t_raw[0]!r}")
+    report.append(f"time_raw_second={t_raw[1]!r}")
+    report.append(f"time_raw_last={t_raw[-1]!r}")
     report.append(f"time_count={len(times)}")
     report.append(f"time_start={times[0].isoformat()}")
     report.append(f"time_end={times[-1].isoformat()}")
@@ -42,7 +45,6 @@ def main() -> None:
     yi0, yi1 = int(lat_indices[0]), int(lat_indices[-1]) + 1
     xi0, xi1 = int(lon_indices[0]), int(lon_indices[-1]) + 1
 
-    # Pull a small final-time regional sample to verify server-side subsetting.
     sample = np.asarray(ds["brexttau"][-1, yi0:yi1:8, xi0:xi1:8].data, dtype=float)
     finite = sample[np.isfinite(sample) & (sample < 1e10)]
     report.append(f"sample_shape={sample.shape}")
