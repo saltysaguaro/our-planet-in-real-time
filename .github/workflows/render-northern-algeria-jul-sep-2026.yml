@@ -1,0 +1,147 @@
+name: Render July-September northern Algeria smoke animation
+
+on:
+  push:
+    branches:
+      - render/northern-algeria-jul1-sep1-2026
+    paths:
+      - '.github/workflows/render-northern-algeria-jul-sep-2026.yml'
+      - 'scripts/render_northern_algeria_jul_sep_2026.py'
+      - 'renders/northern-algeria-jul-sep-2026/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system and Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
+          python -m pip install --disable-pip-version-check \
+            numpy pillow pydap opencv-python-headless
+
+      - name: Download official NASA visualization assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output build/source-first.png \
+            'https://svs.gsfc.nasa.gov/vis/a000000/a005600/a005666/SmokeIntensity_EuropeanWildfires_1920x1080.png'
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output build/bmng-july-5400x2700.jpg \
+            'https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/bmng-topography-bathymetry/july/world.topo.bathy.200407.3x5400x2700.jpg'
+          file build/source-first.png build/bmng-july-5400x2700.jpg
+
+      - name: Render the requested date range
+        shell: bash
+        run: python scripts/render_northern_algeria_jul_sep_2026.py
+
+      - name: Validate encoded video
+        shell: bash
+        run: |
+          set -euo pipefail
+          ffprobe -v error \
+            -show_entries stream=codec_name,width,height,r_frame_rate,avg_frame_rate,nb_frames,pix_fmt \
+            -show_entries format=duration,size,format_name \
+            -of default=noprint_wrappers=1 \
+            build/NASA_GEOS_FP_northern_Algeria_20260701_20260901_1920x1080.mp4 \
+            | tee build/FFPROBE.txt
+
+          frames=$(ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames \
+            -of csv=p=0 build/NASA_GEOS_FP_northern_Algeria_20260701_20260901_1920x1080.mp4)
+          test "$frames" = "1512"
+
+      - name: Write provenance and include workflow source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > build/PROVENANCE.txt <<'EOF'
+          Northern-Algeria-focused wildfire-smoke animation
+          Requested interval: 01 July 2026 00:00 UTC through 01 September 2026 23:00 UTC
+
+          SCIENTIFIC FIELD
+          NASA GMAO GEOS-FP brown-carbon aerosol optical depth (brexttau), from:
+          https://opendap.nccs.nasa.gov/dods/GEOS-5/fp/0.25_deg/seamless/tavg3_2d_aer_Nx.latest
+
+          The exact regional subset used for this render is included as:
+          GEOS_FP_brexttau_northern_Africa_20260701_20260901.npz
+
+          Native product characteristics:
+          - 0.25 degree latitude by 0.3125 degree longitude grid
+          - three-hour time-averaged aerosol fields centered at 01:30, 04:30, ... UTC
+          - brown-carbon aerosol optical depth, clipped only for display at the
+            released visualization legend maximum of 0.5
+
+          TEMPORAL WORKFLOW
+          The requested UTC interval is represented by one modeled hour per video
+          frame. Native three-hour fields are linearly interpolated to integer UTC
+          hours. The video contains 1,512 frames at 30 frames per second.
+
+          VISUAL WORKFLOW
+          - Northern Algeria is centered in an orthographic globe view.
+          - Basemap: NASA Blue Marble: Next Generation, July monthly composite.
+          - Legend colors and the NASA/GMAO information panels are sampled/copied
+            from the official NASA SVS 5666 released visualization asset.
+          - Smoke color and transparency increase monotonically with brown-carbon
+            AOD; no plume geometry is hand-drawn or synthetically invented.
+          - Final encoding: 1920x1080 H.264, 30 fps, yuv420p.
+
+          RELATION TO NASA SVS 5666
+          NASA SVS 5666 used a GEOS-CAM convection-allowing 2 km replay to GEOS-FP
+          analysis for 01-30 July 2026. NASA identifies the datasets and released
+          media, but does not publish the complete internal visualization project
+          or a public 2 km replay archive covering the requested extension through
+          01 September. Therefore this edition reproduces the released framing,
+          legend, visual language, and one-hour-per-frame cadence using NASA's
+          official continuous public GEOS-FP brown-carbon AOD product for the full
+          interval. It is not represented as an unpublished GEOS-CAM 2 km rerun.
+
+          OFFICIAL REFERENCES
+          NASA SVS 5666:
+          https://svs.gsfc.nasa.gov/5666/
+
+          NASA SVS daily GEOS-FP smoke visualization:
+          https://svs.gsfc.nasa.gov/5624/
+
+          NASA Blue Marble: Next Generation:
+          https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation-july-2004-73801/
+          EOF
+
+          cp scripts/render_northern_algeria_jul_sep_2026.py build/
+          cp .github/workflows/render-northern-algeria-jul-sep-2026.yml build/
+
+      - name: Upload final video, data, quality-control frames, and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: northern-algeria-smoke-20260701-through-20260901
+          path: |
+            build/NASA_GEOS_FP_northern_Algeria_20260701_20260901_1920x1080.mp4
+            build/GEOS_FP_brexttau_northern_Africa_20260701_20260901.npz
+            build/qc-start.png
+            build/qc-midpoint.png
+            build/qc-end.png
+            build/PROVENANCE.txt
+            build/RENDER_METADATA.json
+            build/FFPROBE.txt
+            build/render_northern_algeria_jul_sep_2026.py
+            build/render-northern-algeria-jul-sep-2026.yml
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
