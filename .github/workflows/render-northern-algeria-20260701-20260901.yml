@@ -1,0 +1,255 @@
+name: Render Northern Algeria smoke, 1 Jul-1 Sep 2026
+
+on:
+  push:
+    branches:
+      - render/northern-algeria-20260701-20260901
+    paths:
+      - '.github/workflows/render-northern-algeria-20260701-20260901.yml'
+      - 'renders/northern-algeria-20260701-20260901/render.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rendering dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg unzip
+          python -m pip install --upgrade pip
+          python -m pip install \
+            xarray pydap numpy pandas pillow pyshp \
+            opencv-python-headless scipy
+
+      - name: Download official NASA and Natural Earth resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/input build/natural-earth build/output build/package
+          curl --fail --location --retry 5 --retry-all-errors \
+            -o build/input/source.mp4 \
+            'https://svs.gsfc.nasa.gov/vis/a000000/a005600/a005666/SmokeIntensity_EuropeanWildfires_082426_1920x1080.mp4'
+          curl --fail --location --retry 5 --retry-all-errors \
+            -o build/input/bmng-july.jpg \
+            'https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/bmng-topography-bathymetry/july/world.topo.bathy.200407.3x5400x2700.jpg'
+          curl --fail --location --retry 5 --retry-all-errors \
+            -o build/input/natural-earth-boundaries.zip \
+            'https://naturalearth.s3.amazonaws.com/50m_cultural/ne_50m_admin_0_boundary_lines_land.zip'
+          unzip -q build/input/natural-earth-boundaries.zip -d build/natural-earth
+          sha256sum build/input/source.mp4 build/input/bmng-july.jpg \
+            build/input/natural-earth-boundaries.zip > build/output/input-sha256.txt
+
+      - name: Reproduce the released NASA segment through 30 July 00:00 UTC
+        shell: bash
+        run: |
+          set -euo pipefail
+          ffmpeg -hide_banner -loglevel warning -y -i build/input/source.mp4 \
+            -filter_complex "\
+              [0:v]split=4[base][legend][logos][clock];\
+              [base]crop=960:540:460:540,scale=1920:1080:flags=lanczos[focus];\
+              [legend]crop=460:190:0:0[legend_panel];\
+              [logos]crop=190:190:1730:0[logo_panel];\
+              [clock]crop=460:110:0:970[clock_panel];\
+              [focus][legend_panel]overlay=0:0[tmp1];\
+              [tmp1][logo_panel]overlay=W-w:0[tmp2];\
+              [tmp2][clock_panel]overlay=0:H-h,format=yuv420p[outv]" \
+            -map '[outv]' -an \
+            -c:v libx264 -preset medium -crf 17 -profile:v high -level 4.2 \
+            -pix_fmt yuv420p -movflags +faststart \
+            build/output/released-segment-through-20260730-0000.mp4
+
+          ffprobe -v error -count_frames -select_streams v:0 \
+            -show_entries stream=codec_name,width,height,r_frame_rate,nb_read_frames \
+            -show_entries format=duration,size \
+            -of default=noprint_wrappers=1 \
+            build/output/released-segment-through-20260730-0000.mp4 \
+            | tee build/output/released-segment-metadata.txt
+
+      - name: Render the public-data continuation through 1 September 00:00 UTC
+        shell: bash
+        run: |
+          set -euo pipefail
+          python renders/northern-algeria-20260701-20260901/render.py \
+            --mode continuation \
+            --source-movie build/input/source.mp4 \
+            --bmng build/input/bmng-july.jpg \
+            --boundaries-shp build/natural-earth/ne_50m_admin_0_boundary_lines_land.shp \
+            --start '2026-07-30 01:00 UTC' \
+            --end '2026-09-01 00:00 UTC' \
+            --output-dir build/output
+
+          ffprobe -v error -count_frames -select_streams v:0 \
+            -show_entries stream=codec_name,width,height,r_frame_rate,nb_read_frames \
+            -show_entries format=duration,size \
+            -of default=noprint_wrappers=1 \
+            build/output/continuation-geos-fp.mp4 \
+            | tee build/output/continuation-metadata.txt
+
+      - name: Assemble and validate the complete animation
+        shell: bash
+        run: |
+          set -euo pipefail
+          FINAL='build/package/NASA_SVS_style_northern_Algeria_2026-07-01_to_2026-09-01_1920x1080.mp4'
+          printf "file '%s'\nfile '%s'\n" \
+            "$(realpath build/output/released-segment-through-20260730-0000.mp4)" \
+            "$(realpath build/output/continuation-geos-fp.mp4)" \
+            > build/output/concat.txt
+
+          # Both segments are encoded with the same H.264 parameters. Stream
+          # concatenation preserves the rendered segment pixels without an
+          # additional lossy generation.
+          ffmpeg -hide_banner -loglevel warning -y \
+            -f concat -safe 0 -i build/output/concat.txt \
+            -c copy -movflags +faststart "$FINAL"
+
+          frame_count=$(ffprobe -v error -count_frames -select_streams v:0 \
+            -show_entries stream=nb_read_frames -of csv=p=0 "$FINAL")
+          if [[ "$frame_count" != "1477" ]]; then
+            echo "Unexpected stream-copy frame count $frame_count; rebuilding with concat filter." >&2
+            ffmpeg -hide_banner -loglevel warning -y \
+              -i build/output/released-segment-through-20260730-0000.mp4 \
+              -i build/output/continuation-geos-fp.mp4 \
+              -filter_complex '[0:v][1:v]concat=n=2:v=1:a=0,format=yuv420p[v]' \
+              -map '[v]' -an -c:v libx264 -preset medium -crf 17 \
+              -profile:v high -level 4.2 -pix_fmt yuv420p -movflags +faststart \
+              "$FINAL"
+            frame_count=$(ffprobe -v error -count_frames -select_streams v:0 \
+              -show_entries stream=nb_read_frames -of csv=p=0 "$FINAL")
+          fi
+          [[ "$frame_count" == "1477" ]]
+
+          ffprobe -v error -count_frames -select_streams v:0 \
+            -show_entries stream=codec_name,profile,pix_fmt,width,height,r_frame_rate,nb_read_frames \
+            -show_entries format=duration,size,bit_rate \
+            -of json "$FINAL" > build/package/FINAL-METADATA.json
+          sha256sum "$FINAL" > build/package/SHA256SUMS.txt
+          cat build/output/input-sha256.txt >> build/package/SHA256SUMS.txt
+
+      - name: Create frame-time manifest and visual quality-control package
+        shell: bash
+        run: |
+          set -euo pipefail
+          FINAL='build/package/NASA_SVS_style_northern_Algeria_2026-07-01_to_2026-09-01_1920x1080.mp4'
+          python - <<'PY'
+          import csv
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+
+          out = Path('build/package/FRAME-TIMESTAMPS.csv')
+          start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+          continuation_start = datetime(2026, 7, 30, 1, tzinfo=timezone.utc)
+          with out.open('w', newline='', encoding='utf-8') as handle:
+              writer = csv.writer(handle)
+              writer.writerow(['frame', 'timestamp_utc', 'segment', 'data_source'])
+              for frame in range(685):
+                  if frame <= 240:
+                      stamp = start + timedelta(hours=frame)
+                  else:
+                      stamp = datetime(2026, 7, 11, 13, tzinfo=timezone.utc) + timedelta(hours=frame - 241)
+                  writer.writerow([frame, stamp.isoformat(), 'released', 'NASA SVS 5666 GEOS-CAM 2 km replay render'])
+              for offset in range(792):
+                  frame = 685 + offset
+                  stamp = continuation_start + timedelta(hours=offset)
+                  writer.writerow([frame, stamp.isoformat(), 'continuation', 'NASA GEOS-FP 0.25 degree BREXTTAU'])
+          PY
+
+          mkdir -p build/package/qc
+          ffmpeg -hide_banner -loglevel error -y -i "$FINAL" \
+            -vf 'select=eq(n\,0)' -vsync vfr -frames:v 1 build/package/qc/01-start-20260701-0000.png
+          ffmpeg -hide_banner -loglevel error -y -i "$FINAL" \
+            -vf 'select=eq(n\,684)' -vsync vfr -frames:v 1 build/package/qc/02-join-before-20260730-0000.png
+          ffmpeg -hide_banner -loglevel error -y -i "$FINAL" \
+            -vf 'select=eq(n\,685)' -vsync vfr -frames:v 1 build/package/qc/03-join-after-20260730-0100.png
+          ffmpeg -hide_banner -loglevel error -y -i "$FINAL" \
+            -vf 'select=eq(n\,1080)' -vsync vfr -frames:v 1 build/package/qc/04-midpoint-20260815-1200.png
+          ffmpeg -hide_banner -loglevel error -y -i "$FINAL" \
+            -vf 'select=eq(n\,1476)' -vsync vfr -frames:v 1 build/package/qc/05-end-20260901-0000.png
+
+          python - <<'PY'
+          from PIL import Image, ImageDraw, ImageFont
+          from pathlib import Path
+
+          files = sorted(Path('build/package/qc').glob('*.png'))
+          labels = [
+              '1 Jul 2026 00:00 UTC',
+              '30 Jul 2026 00:00 UTC — released segment',
+              '30 Jul 2026 01:00 UTC — GEOS-FP continuation',
+              '15 Aug 2026 12:00 UTC',
+              '1 Sep 2026 00:00 UTC',
+          ]
+          font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 24)
+          canvas = Image.new('RGB', (960, 5 * 300), 'white')
+          draw = ImageDraw.Draw(canvas)
+          for i, (path, label) in enumerate(zip(files, labels)):
+              frame = Image.open(path).convert('RGB').resize((480, 270), Image.Resampling.LANCZOS)
+              canvas.paste(frame, (0, i * 300))
+              draw.text((500, i * 300 + 105), label, font=font, fill='black')
+          canvas.save('build/package/QC-CONTACT-SHEET.jpg', quality=92)
+          PY
+
+      - name: Complete provenance and reproducibility files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp build/output/PROVENANCE.txt build/package/PROVENANCE.txt
+          cp build/output/DATA-METADATA.json build/package/DATA-METADATA.json
+          cp build/output/registered-basemap.png build/package/qc/registered-basemap.png
+          cp renders/northern-algeria-20260701-20260901/render.py build/package/render.py
+          cp .github/workflows/render-northern-algeria-20260701-20260901.yml build/package/workflow.yml
+          cat >> build/package/PROVENANCE.txt <<EOF
+
+Final assembly
+--------------
+Repository: saltysaguaro/our-planet-in-real-time
+Branch: render/northern-algeria-20260701-20260901
+Workflow commit: ${GITHUB_SHA}
+Final frame count: 1477
+Frame rate: 30 frames per second
+Date range represented: 1 July 2026 00:00 UTC through 1 September 2026 00:00 UTC
+EOF
+          cat > build/package/README.txt <<'EOF'
+          DELIVERABLE CONTENTS
+
+          NASA_SVS_style_northern_Algeria_2026-07-01_to_2026-09-01_1920x1080.mp4
+              Complete 1920x1080, 30 fps H.264 animation.
+
+          PROVENANCE.txt
+              Scientific-source and method disclosure, including the model
+              transition after the last released NASA SVS frame.
+
+          DATA-METADATA.json
+              NASA GEOS-FP extraction bounds, times, variable, interpolation,
+              and value range.
+
+          FRAME-TIMESTAMPS.csv
+              One row for each of the 1477 video frames.
+
+          FINAL-METADATA.json and SHA256SUMS.txt
+              Media metadata and integrity hashes.
+
+          render.py and workflow.yml
+              Exact reproducible public-data rendering workflow.
+
+          qc/ and QC-CONTACT-SHEET.jpg
+              Start, model-transition, midpoint, end, and registered-basemap
+              quality-control images.
+          EOF
+
+      - name: Upload the final animation package
+        uses: actions/upload-artifact@v4
+        with:
+          name: northern-algeria-smoke-20260701-20260901-final
+          path: build/package
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
