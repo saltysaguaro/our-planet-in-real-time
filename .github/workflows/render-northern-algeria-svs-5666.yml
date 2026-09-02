@@ -1,0 +1,127 @@
+name: Render Northern Algeria focus from NASA SVS 5666
+
+on:
+  push:
+    branches:
+      - render/northern-algeria-svs-5666
+    paths:
+      - '.github/workflows/render-northern-algeria-svs-5666.yml'
+      - 'renders/northern-algeria-svs-5666/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+
+      - name: Download NASA SVS source render
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output build/source.mp4 \
+            'https://svs.gsfc.nasa.gov/vis/a000000/a005600/a005666/SmokeIntensity_EuropeanWildfires_082426_1920x1080.mp4'
+          ffprobe -v error -show_entries format=duration,size -show_entries stream=codec_name,width,height,r_frame_rate \
+            -of default=noprint_wrappers=1 build/source.mp4 | tee build/source-metadata.txt
+
+      - name: Reframe on northern Algeria without altering scientific pixels
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The NASA source is a 1920x1080 finished scientific render. The base
+          # crop selects the western Mediterranean/northern Algeria and is
+          # enlarged 2x. The three original NASA information panels are copied
+          # pixel-for-pixel from the source and placed back at the corners.
+          ffmpeg -hide_banner -loglevel warning -y -i build/source.mp4 \
+            -filter_complex "\
+              [0:v]split=4[base][legend][logos][clock];\
+              [base]crop=960:540:360:540,scale=1920:1080:flags=lanczos[focus];\
+              [legend]crop=460:190:0:0[legend_panel];\
+              [logos]crop=190:190:1730:0[logo_panel];\
+              [clock]crop=460:110:0:970[clock_panel];\
+              [focus][legend_panel]overlay=0:0[tmp1];\
+              [tmp1][logo_panel]overlay=W-w:0[tmp2];\
+              [tmp2][clock_panel]overlay=0:H-h,format=yuv420p[outv]" \
+            -map '[outv]' -map 0:a? \
+            -c:v libx264 -preset medium -crf 17 -profile:v high -level 4.2 \
+            -c:a copy -movflags +faststart \
+            build/NASA_SVS_5666_northern_Algeria_focus_1920x1080.mp4
+
+          ffprobe -v error -show_entries format=duration,size -show_entries stream=codec_name,width,height,r_frame_rate \
+            -of default=noprint_wrappers=1 build/NASA_SVS_5666_northern_Algeria_focus_1920x1080.mp4 \
+            | tee build/output-metadata.txt
+
+      - name: Create quality-control stills
+        shell: bash
+        run: |
+          set -euo pipefail
+          duration=$(ffprobe -v error -show_entries format=duration -of csv=p=0 build/NASA_SVS_5666_northern_Algeria_focus_1920x1080.mp4)
+          midpoint=$(awk -v d="$duration" 'BEGIN { printf "%.3f", d/2 }')
+          ffmpeg -hide_banner -loglevel error -y -ss "$midpoint" \
+            -i build/NASA_SVS_5666_northern_Algeria_focus_1920x1080.mp4 \
+            -frames:v 1 build/qc-midpoint.png
+          ffmpeg -hide_banner -loglevel error -y -ss 1 \
+            -i build/NASA_SVS_5666_northern_Algeria_focus_1920x1080.mp4 \
+            -frames:v 1 build/qc-start.png
+
+      - name: Write provenance record
+        shell: bash
+        run: |
+          cat > build/PROVENANCE.txt <<'EOF'
+          Derived northern-Algeria-focused edition of NASA SVS visualization 5666.
+
+          Official source:
+          https://svs.gsfc.nasa.gov/5666/
+
+          Source movie:
+          SmokeIntensity_EuropeanWildfires_082426_1920x1080.mp4
+
+          Scientific quantity and model:
+          Wildfire Smoke Intensity estimated from Brown Carbon Aerosol Optical
+          Depth in NASA's GEOS-CAM 2 km replay to GEOS-FP analysis, July 1-30,
+          2026, over the Blue Marble: Next Generation basemap.
+
+          Transformation:
+          Spatial reframe only. The official NASA finished render is cropped to
+          the western Mediterranean and northern Algeria, enlarged to 1920x1080,
+          and the original legend, NASA/GMAO credit panel, and UTC timestamp
+          panel are copied from the same source frames. No scientific values,
+          timestamps, colors, opacity, or temporal cadence are recalculated.
+
+          Important reproducibility note:
+          NASA SVS identifies the datasets and visualizers but does not publish
+          the visualization's complete internal project files or exact software
+          recipe. Therefore this artifact preserves the authors' released render
+          exactly at the pixel/data-encoding level, apart from the documented
+          camera crop and scaling; it is not represented as an independent
+          re-render from unpublished GEOS-CAM source files.
+
+          Credits:
+          NASA Scientific Visualization Studio; NASA Global Modeling and
+          Assimilation Office; FEDS; FIRMS. Visualizers: Helen-Nicole Kostis,
+          Joseph V. Ardizzone, and Zoey N. Armstrong. Scientific consulting:
+          Allison Collow and Elijah Orland.
+          EOF
+
+      - name: Upload rendered video and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: nasa-svs-5666-northern-algeria-focus
+          path: |
+            build/NASA_SVS_5666_northern_Algeria_focus_1920x1080.mp4
+            build/qc-start.png
+            build/qc-midpoint.png
+            build/source-metadata.txt
+            build/output-metadata.txt
+            build/PROVENANCE.txt
+          if-no-files-found: error
+          retention-days: 30
