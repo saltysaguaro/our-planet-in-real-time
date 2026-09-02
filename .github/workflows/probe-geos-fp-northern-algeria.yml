@@ -1,0 +1,73 @@
+name: Probe GEOS-FP Brown Carbon AOD for Northern Algeria
+
+on:
+  push:
+    branches:
+      - render/northern-algeria-20260701-20260901
+    paths:
+      - '.github/workflows/probe-geos-fp-northern-algeria.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install xarray pydap netCDF4 numpy matplotlib pillow
+
+      - name: Probe OPeNDAP assimilation archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          python - <<'PY' | tee build/probe.txt
+          import xarray as xr
+          import numpy as np
+          import matplotlib.pyplot as plt
+
+          url = 'https://opendap.nccs.nasa.gov/dods/GEOS-5/fp/0.25_deg/assim/tavg3_2d_aer_Nx'
+          print('opening', url)
+          ds = xr.open_dataset(url, engine='pydap', decode_times=True)
+          print(ds)
+          print('time first:', ds.time.values[0])
+          print('time last:', ds.time.values[-1])
+          print('variable attrs:', ds['brexttau'].attrs)
+
+          sub = ds['brexttau'].sel(
+              time=slice('2026-07-01T00:00:00', '2026-07-01T23:59:59'),
+              lat=slice(20, 50),
+              lon=slice(-20, 40),
+          ).load()
+          print('subset:', sub)
+          print('min/max:', float(np.nanmin(sub.values)), float(np.nanmax(sub.values)))
+          print('times:', sub.time.values)
+
+          frame = sub.isel(time=0)
+          plt.figure(figsize=(10, 5))
+          plt.imshow(frame.values, origin='lower', aspect='auto', vmin=0, vmax=.5, cmap='YlOrBr')
+          plt.colorbar()
+          plt.title(str(frame.time.values))
+          plt.tight_layout()
+          plt.savefig('build/sample.png', dpi=120)
+          PY
+
+      - name: Upload probe output
+        uses: actions/upload-artifact@v4
+        with:
+          name: geos-fp-probe
+          path: build
+          if-no-files-found: error
+          retention-days: 7
